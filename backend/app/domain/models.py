@@ -46,3 +46,30 @@ class ChatResult:
     user_message: Message
     assistant_message: Message
     model: str
+
+
+@dataclass(slots=True)
+class UserContext:
+    """Contexto enriquecido del usuario por rol"""
+    user_id: str
+    
+    # Contexto empresarial
+    company_info: dict | None = None  # {misión, visión, valores, productos, horarios, faqs}
+    
+    # Contexto educativo
+    educational_profile: dict | None = None  # {materias, nivel, dificultades, estilo_enseñanza, objetivos}
+    
+    # Contexto psicológico
+    psychological_profile: dict | None = None  # {sentimientos, situaciones, objetivos, preferencias_comunicacion}
+    
+    # Contexto técnico
+    technical_profile: dict | None = None  # {lenguajes, proyectos, nivel, estilo_explicacion}
+    
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class EnrichedChatCommand(IncomingChatCommand):
+    """Comando de chat enriquecido con contexto del usuario"""
+    user_context: UserContext | None = None

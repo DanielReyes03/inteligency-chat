@@ -1,16 +1,22 @@
 from app.application.errors import NotFoundAppError, ValidationAppError
 from app.application.ports.conversation_repository import ConversationRepository
 from app.application.ports.llm_client import LLMClient
+from app.application.ports.user_context_repository import UserContextRepository
 from app.domain.models import ChatResult, IncomingChatCommand
-from app.domain.roles import get_role_profile
+from app.domain.roles import build_enriched_system_prompt, get_role_profile
 
 
 class ChatService:
     def __init__(
-        self, *, repository: ConversationRepository, llm_client: LLMClient
+        self,
+        *,
+        repository: ConversationRepository,
+        llm_client: LLMClient,
+        user_context_repository: UserContextRepository | None = None,
     ) -> None:
         self._repository = repository
         self._llm_client = llm_client
+        self._user_context_repository = user_context_repository
 
     def send_message(self, command: IncomingChatCommand) -> ChatResult:
         role = command.role.strip().lower()
@@ -40,8 +46,17 @@ class ChatService:
             )
 
         user_message = self._repository.add_user_message(conversation.id, message)
+
+        # 🔍 OBTENER CONTEXTO DEL USUARIO (si existe)
+        user_context = None
+        if self._user_context_repository and command.user_id:
+            user_context = self._user_context_repository.get(command.user_id)
+
+        # 🎯 CONSTRUIR SYSTEM PROMPT ENRIQUECIDO
+        system_prompt = build_enriched_system_prompt(role, user_context)
+
         assistant_text = self._llm_client.generate(
-            system_prompt=role_profile.system_prompt,
+            system_prompt=system_prompt,
             user_message=message,
         )
         if not assistant_text.strip():

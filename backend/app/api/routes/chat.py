@@ -6,8 +6,10 @@ from app.api.schemas.chat import (
     ConversationMessageResponse,
     HistoryResponse,
 )
+from app.application.errors import ValidationAppError
 from app.application.services.chat_service import ChatService
 from app.infrastructure.channels.web_adapter import WebChannelAdapter
+from app.infrastructure.channels.telegram_adapter import TelegramChannelAdapter
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -16,15 +18,28 @@ def _get_chat_service(request: Request) -> ChatService:
     return request.app.state.chat_service
 
 
-def _get_web_adapter(request: Request) -> WebChannelAdapter:
-    return request.app.state.web_adapter
+def _get_adapter(request: Request, channel: str):
+    """Obtiene el adaptador correcto según el canal"""
+    channel = channel.strip().lower()
+    
+    if channel == "web":
+        return request.app.state.web_adapter
+    elif channel == "telegram":
+        return request.app.state.telegram_adapter
+    else:
+        raise ValidationAppError(
+            code="UNSUPPORTED_CHANNEL",
+            message=f"Canal '{channel}' no soportado. Usa: web, telegram",
+        )
 
 
 @router.post("/messages", response_model=ChatMessageResponse)
 def post_message(payload: ChatMessageRequest, request: Request) -> ChatMessageResponse:
     chat_service = _get_chat_service(request)
-    web_adapter = _get_web_adapter(request)
-    command = web_adapter.normalize_incoming(payload.model_dump())
+    
+    # Obtener el adaptador correcto según el canal
+    adapter = _get_adapter(request, payload.channel)
+    command = adapter.normalize_incoming(payload.model_dump())
     result = chat_service.send_message(command)
 
     return ChatMessageResponse(

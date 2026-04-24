@@ -8,14 +8,20 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes.chat import router as chat_router
+from app.api.routes.context import router as context_router
 from app.api.routes.health import router as health_router
 from app.api.routes.roles import router as roles_router
+from app.api.routes.telegram import router as telegram_router
 from app.application.errors import AppError
 from app.application.services.chat_service import ChatService
 from app.config import Settings, get_settings
 from app.infrastructure.channels.web_adapter import WebChannelAdapter
+from app.infrastructure.channels.telegram_adapter import TelegramChannelAdapter
 from app.infrastructure.db.repositories.sqlite_conversation_repository import (
     SQLiteConversationRepository,
+)
+from app.infrastructure.db.repositories.sqlite_user_context_repository import (
+    SQLiteUserContextRepository,
 )
 from app.infrastructure.db.session import (
     create_engine_for_url,
@@ -64,11 +70,19 @@ def create_app(
         timeout_seconds=app_settings.OLLAMA_TIMEOUT_SECONDS,
     )
 
+    # 🆕 Crear repositorio de contexto de usuario
+    user_context_repository = SQLiteUserContextRepository(
+        session=session_factory()
+    )
+
     app.state.chat_service = ChatService(
         repository=chat_repository,
         llm_client=model_client,
+        user_context_repository=user_context_repository,
     )
     app.state.web_adapter = WebChannelAdapter()
+    app.state.telegram_adapter = TelegramChannelAdapter()
+    app.state.user_context_repository = user_context_repository
 
     @app.exception_handler(AppError)
     async def _app_error_handler(_, exc: AppError):
@@ -105,6 +119,8 @@ def create_app(
     router.include_router(health_router)
     router.include_router(roles_router)
     router.include_router(chat_router)
+    router.include_router(context_router)  # 🆕 Contexto de usuario
+    router.include_router(telegram_router)  # 🆕 Telegram integration
     app.include_router(router)
 
     static_dir = Path(__file__).resolve().parent / "static"

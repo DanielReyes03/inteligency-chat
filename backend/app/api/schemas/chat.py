@@ -15,6 +15,7 @@ class ErrorEnvelope(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     conversation_id: str | None = None
+    chat_id: str | None = None
     channel: str = "web"
     role: str
     user_id: str | None = None

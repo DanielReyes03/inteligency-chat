@@ -9,3 +9,5 @@ chat_roles.db
 *.sqlite3
 
 .env
+
+/backend/venv

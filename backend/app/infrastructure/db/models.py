@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.db.session import Base
@@ -55,3 +55,31 @@ class MessageORM(Base):
     )
 
     conversation: Mapped[ConversationORM] = relationship(back_populates="messages")
+
+
+class UserContextORM(Base):
+    __tablename__ = "users_context"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    
+    # Contexto empresarial
+    company_info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
+    # Contexto educativo
+    educational_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
+    # Contexto psicológico
+    psychological_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
+    # Contexto técnico
+    technical_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_utc, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now_utc,
+        onupdate=_now_utc,
+        nullable=False,
+    )

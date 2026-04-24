@@ -15,11 +15,13 @@ This project is designed as a practical foundation for **role-driven conversatio
 - [Request Flow](#request-flow)
 - [Tech Stack](#tech-stack)
 - [Role Catalog](#role-catalog)
+- [User Context](#user-context)
 - [API Overview](#api-overview)
 - [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
 - [Configuration](#configuration)
 - [Running the Application](#running-the-application)
+- [Telegram Bot Guide](#telegram-bot-guide)
 - [Running Tests](#running-tests)
 - [Current Limitations](#current-limitations)
 - [Roadmap](#roadmap)
@@ -55,17 +57,19 @@ That makes it useful for:
 
 ## Current Features
 
-### Implemented in the MVP
+### Implemented
 
 - FastAPI backend serving API endpoints and static frontend assets
-- Local persistence with SQLite
+- Local persistence with SQLite (conversations, messages, user context)
 - Ollama integration through HTTP
 - Minimal web UI for sending messages
 - Fixed role catalog with four role profiles
-- Role-specific system prompts
+- Role-specific system prompts enriched with per-user context
 - Conversation and message history retrieval
 - Centralized error handling with consistent API envelopes
-- Base channel abstraction for future multi-channel support
+- Multi-channel architecture: Web and Telegram adapters implemented
+- **Telegram bot** with polling, role selection, and context management
+- **User context system**: per-user profiles that personalize LLM responses per role
 
 ### Included Roles
 
@@ -78,40 +82,47 @@ That makes it useful for:
 
 ## Architecture
 
-The system follows a **modular monolith** approach.
+The system follows a **modular monolith** approach with hexagonal architecture principles.
 
 - **FastAPI** is the composition root and HTTP interface.
-- **ChatService** is the application core.
-- **SQLite repository** persists conversations and messages.
+- **ChatService** is the application core — channel-agnostic.
+- **Channel adapters** normalize each transport's payload into a standard `IncomingChatCommand`.
+- **SQLite repositories** persist conversations, messages, and user context.
 - **Ollama client** handles local LLM requests.
-- **Channel adapters** normalize input depending on the transport.
+- **Telegram bot** runs independently via polling, calling the FastAPI backend over HTTP.
 
 ```mermaid
 flowchart LR
-    UI[Web UI] --> API[FastAPI API]
-    API --> ADAPTER[Web Channel Adapter]
-    ADAPTER --> SERVICE[ChatService]
-    SERVICE --> ROLES[Role Catalog]
+    WEB[Web UI] --> API[FastAPI API]
+    BOT[Telegram Bot] --> API
+
+    API --> WA[WebChannelAdapter]
+    API --> TA[TelegramChannelAdapter]
+
+    WA --> SERVICE[ChatService]
+    TA --> SERVICE
+
+    SERVICE --> ROLES[Role Catalog + Context Enrichment]
     SERVICE --> REPO[SQLite Conversation Repository]
+    SERVICE --> CTX[SQLite User Context Repository]
     SERVICE --> LLM[Ollama Client]
+
     REPO --> DB[(SQLite)]
+    CTX --> DB
     LLM --> OLLAMA[Ollama Local Model]
 ```
 
 ### Architectural Intent
 
-The current implementation deliberately keeps the system small, but the boundaries are already in place for future channel integrations. The important idea is this:
-
-- **transport/channel concerns** should stay outside the core,
-- while **conversation logic** remains reusable.
-
-This is why the project already includes channel adapter contracts, even though the current production-ready flow is web-first.
+Transport concerns stay outside the core. Each channel adapter converts its specific payload into the same `IncomingChatCommand` that `ChatService` understands. Adding a new channel (e.g. WhatsApp) requires only a new adapter class — the service, repositories, and LLM client remain untouched.
 
 ---
 
 ## Request Flow
 
 The core business flow is intentionally simple and traceable.
+
+**Web channel:**
 
 ```mermaid
 sequenceDiagram
@@ -120,22 +131,42 @@ sequenceDiagram
     participant API as FastAPI
     participant Adapter as WebChannelAdapter
     participant Service as ChatService
-    participant Repo as SQLite Repository
+    participant CTX as UserContextRepository
+    participant Repo as ConversationRepository
     participant LLM as Ollama Client
-    participant Model as Ollama Model
 
     User->>UI: Select role + write message
     UI->>API: POST /api/v1/chat/messages
-    API->>Adapter: Normalize request payload
+    API->>Adapter: Normalize payload
     Adapter->>Service: IncomingChatCommand
-    Service->>Repo: Create/retrieve conversation
-    Service->>LLM: Generate response(role prompt + user message)
-    LLM->>Model: HTTP request
-    Model-->>LLM: Generated text
-    Service->>Repo: Persist user and assistant messages
+    Service->>Repo: get_or_create conversation
+    Service->>CTX: get user context (if user_id)
+    Service->>Service: build_enriched_system_prompt(role + context)
+    Service->>LLM: generate(system_prompt, message)
+    LLM-->>Service: assistant text
+    Service->>Repo: persist user + assistant messages
     Service-->>API: ChatResult
-    API-->>UI: Structured response JSON
-    UI-->>User: Render assistant response
+    API-->>UI: ChatMessageResponse JSON
+    UI-->>User: Render response
+```
+
+**Telegram channel:**
+
+```mermaid
+sequenceDiagram
+    participant User as Telegram User
+    participant Bot as Telegram Bot (polling)
+    participant API as FastAPI
+    participant Adapter as TelegramChannelAdapter
+    participant Service as ChatService
+
+    User->>Bot: Send message
+    Bot->>API: POST /api/v1/chat/messages (channel=telegram)
+    API->>Adapter: Normalize payload (chat_id → conversation_id)
+    Adapter->>Service: IncomingChatCommand
+    Service-->>API: ChatResult
+    API-->>Bot: ChatMessageResponse JSON
+    Bot-->>User: Reply with assistant text
 ```
 
 ---
@@ -146,13 +177,14 @@ sequenceDiagram
 |---|---|---|
 | Backend API | FastAPI | HTTP API and static file serving |
 | Web Server | Uvicorn | Local ASGI runtime |
-| Persistence | SQLite | Lightweight storage for conversations and messages |
+| Persistence | SQLite | Conversations, messages, and user context |
 | ORM / DB Access | SQLAlchemy | Database models and repository implementation |
 | LLM Integration | Ollama (HTTP) | Local model inference |
-| HTTP Client | httpx | Calls to Ollama API |
+| HTTP Client | httpx | Calls to Ollama API and internal API from bot |
 | Settings | pydantic-settings | Environment-based configuration |
 | Testing | pytest | Unit, integration, and contract tests |
 | Frontend | HTML, CSS, JavaScript | Minimal browser-based chat UI |
+| Telegram Bot | python-telegram-bot 21 | Polling-based Telegram integration |
 
 ---
 
@@ -170,6 +202,29 @@ The current role catalog is intentionally fixed and versioned in code.
 These role definitions are implemented in:
 
 - `backend/app/domain/roles.py`
+
+---
+
+## User Context
+
+Each user can have a persistent profile that the system injects into the LLM's system prompt, personalizing every response without the user having to repeat themselves.
+
+### How it works
+
+1. When a message includes a `user_id`, the service fetches the stored context for that user.
+2. `build_enriched_system_prompt(role, user_context)` appends the relevant profile fields to the base role prompt.
+3. The enriched prompt is sent to Ollama — the model responds with full awareness of the user's background.
+
+### Profile fields per role
+
+| Role | Profile stored | Key fields |
+|---|---|---|
+| `profesor` | `educational_profile` | `materias`, `nivel`, `dificultades`, `estilo_enseñanza`, `objetivos` |
+| `programador` | `technical_profile` | `lenguajes`, `nivel`, `proyectos`, `estilo_explicacion` |
+| `psicologo` | `psychological_profile` | `sentimientos`, `situaciones_estresantes`, `objetivos_bienestar`, `preferencias_comunicacion` |
+| `negocios` | `company_info` | `mision`, `vision`, `valores`, `productos`, `politicas`, `horarios`, `faqs` |
+
+Context is stored in SQLite and survives bot or server restarts. It can be updated at any time via the `/api/v1/context/users/{user_id}` endpoint or through the Telegram bot's `/actualizar_contexto` command.
 
 ---
 
@@ -234,6 +289,42 @@ Example response:
 
 Returns the conversation history in chronological order.
 
+### `GET /api/v1/context/users/{user_id}`
+
+Returns the stored context for a user.
+
+### `POST /api/v1/context/users/{user_id}`
+
+Creates or updates the context for a user. Only fields included in the body are updated; omitted fields are left unchanged.
+
+Example request:
+
+```json
+{
+  "technical_profile": {
+    "lenguajes": ["Python", "JavaScript"],
+    "nivel": "Intermedio",
+    "proyectos": "API REST con FastAPI",
+    "estilo_explicacion": "con ejemplos"
+  }
+}
+```
+
+### `POST /api/v1/telegram/messages`
+
+Manual testing endpoint that simulates a Telegram message. In production this would be the webhook target.
+
+Example request:
+
+```json
+{
+  "chat_id": 123456789,
+  "user_id": 123456789,
+  "text": "Explicame qué es una función pura",
+  "role": "profesor"
+}
+```
+
 ---
 
 ## Project Structure
@@ -244,22 +335,37 @@ Returns the conversation history in chronological order.
 │   ├── app/
 │   │   ├── api/
 │   │   │   ├── routes/
+│   │   │   │   ├── chat.py         # POST /chat/messages, GET history
+│   │   │   │   ├── context.py      # GET/POST /context/users/{user_id}
+│   │   │   │   ├── telegram.py     # POST /telegram/messages (testing)
+│   │   │   │   ├── roles.py
+│   │   │   │   └── health.py
 │   │   │   └── schemas/
 │   │   ├── application/
-│   │   │   ├── ports/
+│   │   │   ├── ports/              # Interfaces: ChannelAdapter, LLMClient, repositories
 │   │   │   └── services/
+│   │   │       └── chat_service.py # Core business logic
 │   │   ├── domain/
+│   │   │   ├── models.py           # IncomingChatCommand, ChatResult, UserContext
+│   │   │   └── roles.py            # ROLE_CATALOG + build_enriched_system_prompt
 │   │   ├── infrastructure/
 │   │   │   ├── channels/
+│   │   │   │   ├── web_adapter.py
+│   │   │   │   └── telegram_adapter.py
 │   │   │   ├── db/
+│   │   │   │   ├── models.py       # ORM: Conversation, Message, UserContext
+│   │   │   │   ├── session.py
+│   │   │   │   └── repositories/
 │   │   │   └── llm/
-│   │   ├── static/
+│   │   │       └── ollama_client.py
+│   │   ├── static/                 # Web UI
 │   │   ├── config.py
 │   │   └── main.py
 │   ├── tests/
 │   │   ├── contract/
 │   │   ├── integration/
 │   │   └── unit/
+│   ├── telegram_bot.py             # Telegram bot (polling)
 │   ├── .env.example
 │   └── requirements.txt
 ├── Chat_inteligente_con_roles.md
@@ -275,14 +381,13 @@ Returns the conversation history in chronological order.
 
 Make sure you have:
 
-- **Python 3.11+**
+- **Python 3.10+**
 - **Ollama** installed and running locally
-- At least one local model available in Ollama
-
-Recommended check:
+- The `llama3.1` model pulled (or any model configured in `.env`)
 
 ```bash
-ollama list
+ollama pull llama3.1
+ollama list   # verify it appears
 ```
 
 ---
@@ -303,6 +408,7 @@ Environment variables currently supported:
 | `OLLAMA_BASE_URL` | Base URL of the Ollama HTTP API | `http://localhost:11434` |
 | `OLLAMA_MODEL` | Model name used for generation | `llama3.1` |
 | `OLLAMA_TIMEOUT_SECONDS` | Timeout for model requests | `30` |
+| `TELEGRAM_BOT_TOKEN` | Token from @BotFather — required for the Telegram bot | _(empty)_ |
 
 ---
 
@@ -311,29 +417,86 @@ Environment variables currently supported:
 ### 1. Create and activate a virtual environment
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+cd backend
+python -m venv venv
+source venv/bin/activate
 ```
 
 ### 2. Install dependencies
 
 ```bash
-pip install -r backend/requirements.txt
+pip install -r requirements.txt
 ```
 
-### 3. Start the backend
+### 3. Configure environment
 
 ```bash
-uvicorn app.main:app --reload --app-dir backend
+cp .env.example .env
+# Edit .env and set TELEGRAM_BOT_TOKEN if you want the Telegram bot
 ```
 
-### 4. Open the web UI
+### 4. Start the backend
 
-Visit:
+```bash
+# From inside backend/
+uvicorn app.main:app --reload
+```
+
+### 5. Open the web UI
 
 ```text
 http://127.0.0.1:8000/
 ```
+
+---
+
+## Telegram Bot Guide
+
+The Telegram bot runs as a separate process alongside the FastAPI server. It uses **polling** (no public URL required) and communicates with the backend over HTTP.
+
+### Setup
+
+1. Talk to [@BotFather](https://t.me/BotFather) on Telegram, create a bot, and copy the token.
+2. Add the token to `backend/.env`:
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABC-your-token-here
+```
+
+3. With the FastAPI server already running, start the bot in a second terminal:
+
+```bash
+cd backend
+source venv/bin/activate
+python telegram_bot.py
+```
+
+### Available commands
+
+| Command | Description |
+|---|---|
+| `/start` | Welcome message and role selector keyboard |
+| `/cambiar_rol` | Switch to a different role (starts a new conversation) |
+| `/actualizar_contexto` | Fill in your personal profile for the active role |
+| `/contexto` | View your currently stored context |
+| `/historial` | Show the last 10 messages of the current conversation |
+| `/cancelar` | End the current conversation |
+| `/help` | Show command reference |
+
+### Personalizing responses with context
+
+The bot can store a profile per role so the LLM always knows who it is talking to. Use `/actualizar_contexto` after selecting a role and answer the 4 questions:
+
+- **Profesor**: materias que estudiás, nivel, dificultades, estilo de aprendizaje
+- **Programador**: lenguajes, nivel, proyectos actuales, estilo de explicación
+- **Psicólogo**: estado emocional, situaciones estresantes, objetivos, preferencias de comunicación
+- **Negocios**: misión, visión, productos/servicios, valores
+
+Context persists across sessions in SQLite. You can update it at any time by running `/actualizar_contexto` again.
+
+### How conversation continuity works
+
+The Telegram `chat_id` is used as the conversation identifier. Changing roles with `/cambiar_rol` starts a fresh conversation so role-specific history stays clean. Restarting the bot preserves all history because it is stored in SQLite, not in memory.
 
 ---
 
@@ -355,21 +518,17 @@ The repository includes:
 
 ## Current Limitations
 
-This repository is intentionally scoped as an MVP.
+The project is functional but intentionally scoped.
 
 ### Not included yet
 
-- Full WhatsApp integration with `bot-whatsapp`
+- WhatsApp integration (`bot-whatsapp` + Baileys)
 - Authentication / authorization
-- Admin panel
 - Streaming responses
 - RAG, embeddings, or vector databases
-- Multimedia messaging support
+- Multimedia messaging support (images, voice)
 - Production-grade observability and retry pipelines
-
-### Important note about channels
-
-The architecture is already prepared for future channel adapters, but the currently implemented production path is **web-first**.
+- Admin panel for managing conversations and context
 
 ---
 
@@ -383,13 +542,16 @@ The architecture is already prepared for future channel adapters, but the curren
 - [x] Add SQLite persistence
 - [x] Add minimal web interface
 - [x] Add automated test suite
+- [x] Implement Telegram bot with polling
+- [x] Add user context system with per-role profile enrichment
+- [x] Multi-channel routing (web + telegram) through shared `ChatService`
 
 ### Next logical steps
 
 - [ ] Integrate WhatsApp through a dedicated Node bridge (`bot-whatsapp` + Baileys)
-- [ ] Decouple adapter resolution from the hardcoded web runtime
-- [ ] Add regression tests for multi-channel behavior
+- [ ] Add regression tests for multi-channel behavior and context enrichment
 - [ ] Add smoke-test documentation for real Ollama execution
+- [ ] Streaming responses for faster perceived latency
 
 ---
 

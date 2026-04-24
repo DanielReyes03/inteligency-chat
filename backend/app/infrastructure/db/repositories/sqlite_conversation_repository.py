@@ -35,19 +35,21 @@ class SQLiteConversationRepository:
         with self._session() as session:
             if conversation_id:
                 existing = session.get(ConversationORM, conversation_id)
-                if existing is None:
-                    raise NotFoundAppError(
-                        code="CONVERSATION_NOT_FOUND",
-                        message="La conversación solicitada no existe",
-                    )
-                return self._to_conversation(existing)
+                if existing is not None:
+                    return self._to_conversation(existing)
+                # ID proporcionado pero no existe → crear con ese ID exacto
+                new_conversation = ConversationORM(
+                    id=conversation_id, channel=channel, role=role, user_id=user_id
+                )
+            else:
+                new_conversation = ConversationORM(
+                    channel=channel, role=role, user_id=user_id
+                )
 
-            new_conversation = ConversationORM(
-                channel=channel, role=role, user_id=user_id
-            )
             session.add(new_conversation)
             session.flush()
             session.refresh(new_conversation)
+            session.commit()
             return self._to_conversation(new_conversation)
 
     def add_user_message(self, conversation_id: str, content: str) -> Message:

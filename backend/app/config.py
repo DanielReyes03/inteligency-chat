@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.1"
     OLLAMA_TIMEOUT_SECONDS: float = 30.0
+    TELEGRAM_BOT_TOKEN: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
